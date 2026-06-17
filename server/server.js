@@ -13,6 +13,8 @@ import invoiceRoutes from './routes/invoiceRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 
+
+
 dotenv.config();
 connectDB();
 
@@ -32,6 +34,8 @@ app.use('/api/servicerecords', serviceRecordRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin', adminRoutes);
+
+
 
 // Base Route
 app.get('/', (req, res) => {

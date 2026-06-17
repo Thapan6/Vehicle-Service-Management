@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # AutoCare: Vehicle Service Management Platform 🚗🔧
 AutoCare is a comprehensive, full-stack MERN application designed to streamline vehicle service operations. It provides a robust platform for vehicle owners, service centers, and administrators to manage service bookings, track vehicle history, and handle billing with high precision.
 
@@ -96,8 +95,3 @@ Detailed project reports and guides are included in the root directory:
 Contributions are welcome! Please fork the repository and create a pull request for any improvements or bug fixes.
 
 ---
-
-
-=======
-# Vehicle-Service-Management
->>>>>>> 34bda5cd5540f9f9c65936ed986249f3737d5afb

@@ -2,7 +2,32 @@ import asyncHandler from 'express-async-handler';
 import ServiceRecord from '../models/serviceRecordModel.js';
 import Appointment from '../models/appointmentModel.js';
 import Vehicle from '../models/vehicleModel.js';
+import Invoice from '../models/invoiceModel.js';
 import { createNotification } from './notificationController.js';
+
+// Helper to sync cost of completed records if missing
+const syncCompletedRecordCost = async (record) => {
+  if (record.status === 'Completed' && (!record.totalCost || record.totalCost === 0)) {
+    const invoice = await Invoice.findOne({ serviceRecord: record._id });
+    let billedPrice = 0;
+    if (invoice) {
+      billedPrice = invoice.totalAmount;
+    } else {
+      const partsTotal = record.partsUsed && record.partsUsed.length > 0
+        ? record.partsUsed.reduce((acc, part) => acc + (part.price * part.quantity), 0)
+        : 0;
+      const FIXED_RATE = 100; // $100/hr
+      const laborCost = (record.laborHours || 0) * FIXED_RATE;
+      const amount = partsTotal + laborCost;
+      const tax = amount * 0.10; // 10% tax rate
+      billedPrice = amount + tax;
+    }
+    if (billedPrice > 0) {
+      await ServiceRecord.updateOne({ _id: record._id }, { totalCost: billedPrice });
+      record.totalCost = billedPrice;
+    }
+  }
+};
 
 // @desc    Create a new service record
 // @route   POST /api/servicerecords
@@ -71,6 +96,17 @@ const updateServiceRecordStatus = asyncHandler(async (req, res) => {
     if (status === 'Completed') {
       record.completedAt = Date.now();
       console.log(`✅ SERVICE MARKED AS COMPLETED`);
+
+      // Calculate and store totalCost (billed price: parts + labor + 10% tax)
+      const partsTotal = record.partsUsed && record.partsUsed.length > 0
+        ? record.partsUsed.reduce((acc, part) => acc + (part.price * part.quantity), 0)
+        : 0;
+      const FIXED_RATE = 100; // $100/hr
+      const laborCost = (record.laborHours || 0) * FIXED_RATE;
+      const amount = partsTotal + laborCost;
+      const tax = amount * 0.10; // 10% tax rate
+      record.totalCost = amount + tax;
+      console.log(`   Total Cost calculated: $${record.totalCost}`);
     }
 
     const updatedRecord = await record.save();
@@ -127,6 +163,11 @@ const getServiceRecords = asyncHandler(async (req, res) => {
   const records = await ServiceRecord.find({})
     .populate('vehicle', 'make model licensePlate')
     .populate('technician', 'name');
+
+  for (let record of records) {
+    await syncCompletedRecordCost(record);
+  }
+
   res.status(200).json(records);
 });
 
@@ -154,6 +195,10 @@ const getMyServiceRecords = asyncHandler(async (req, res) => {
   const records = await ServiceRecord.find({ vehicle: { $in: vehicleIds } })
     .populate('vehicle', 'make model licensePlate')
     .sort('-createdAt');
+
+  for (let record of records) {
+    await syncCompletedRecordCost(record);
+  }
     
   res.status(200).json(records);
 });

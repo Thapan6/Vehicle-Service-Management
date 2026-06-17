@@ -25,7 +25,19 @@ const ServiceHistoryCard = ({ records }) => {
           </TableCell>
           <TableCell className="font-mono text-xs">{r.laborHours}h</TableCell>
           <TableCell className="font-black text-slate-800 dark:text-slate-100">
-            ${r.totalCost?.toFixed(2) || '---'}
+            ${(() => {
+              if (r.totalCost && r.totalCost > 0) {
+                return r.totalCost.toFixed(2);
+              }
+              const partsTotal = r.partsUsed && r.partsUsed.length > 0
+                ? r.partsUsed.reduce((acc, part) => acc + (part.price * part.quantity), 0)
+                : 0;
+              const FIXED_RATE = 100; // $100/hr
+              const laborCost = (r.laborHours || 0) * FIXED_RATE;
+              const amount = partsTotal + laborCost;
+              const tax = amount * 0.10; // 10% tax rate
+              return (amount + tax).toFixed(2);
+            })()}
           </TableCell>
           <TableCell className="text-slate-500 text-xs">
             {r.completedAt ? new Date(r.completedAt).toLocaleDateString() : 'N/A'}
