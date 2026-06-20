@@ -1,6 +1,7 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Layout from './components/layout/Layout';
+import PublicLayout from './components/layout/PublicLayout';
 import PrivateRoute from './components/PrivateRoute';
 import AdminRoute from './components/AdminRoute';
 import TechnicianRoute from './components/TechnicianRoute';
@@ -17,6 +18,8 @@ import AdminDashboard from './pages/AdminDashboard';
 import Payments from './pages/Payments';
 import Profile from './pages/Profile';
 import Home from './pages/Home';
+import Documentation from './pages/Documentation';
+import Privacy from './pages/Privacy';
 
 const App = () => {
   return (
@@ -38,6 +41,12 @@ const App = () => {
         <Route path="/" element={<Home />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+
+        {/* Public Informational Routes - Wrapped in PublicLayout */}
+        <Route element={<PublicLayout />}>
+          <Route path="/documentation" element={<Documentation />} />
+          <Route path="/privacy" element={<Privacy />} />
+        </Route>
 
         {/* Protected Dashboard Routes - Wrapped in Layout */}
         <Route element={<Layout />}>

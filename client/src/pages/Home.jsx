@@ -257,9 +257,9 @@ const Home = () => {
             <span className="font-black text-slate-800 dark:text-white uppercase tracking-tighter">VSM</span>
           </div>
           <div className="flex gap-8 text-xs font-black text-slate-400 uppercase tracking-widest">
-             <a href="#" className="hover:text-primary transition-colors">Documentation</a>
-             <a href="#" className="hover:text-primary transition-colors">Privacy</a>
-             <a href="#" className="hover:text-primary transition-colors">Status</a>
+             <Link to="/documentation" className="hover:text-primary transition-colors">Documentation</Link>
+             <Link to="/privacy" className="hover:text-primary transition-colors">Privacy</Link>
+             <Link to="#" className="hover:text-primary transition-colors">Status</Link>
           </div>
           <p className="text-xs font-bold text-slate-400">© 2026 VSM Platform. Built for the future of service.</p>
         </div>
