@@ -7,6 +7,7 @@ import Card from '../components/common/Card';
 import StatusBadge from '../components/common/StatusBadge';
 import Loader from '../components/common/Loader';
 import { WrenchIcon, TruckIcon, HomeIcon } from '../utils/Icons';
+import toast from 'react-hot-toast';
 
 const TechnicianDashboard = () => {
   const [jobs, setJobs] = useState([]);

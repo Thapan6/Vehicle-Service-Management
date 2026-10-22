@@ -14,7 +14,7 @@ const store = configureStore({
     serviceRecords: serviceRecordReducer,
     invoices: invoiceReducer,
   },
-  devTools: process.env.NODE_ENV !== 'production',
+  devTools: import.meta.env.DEV,
 });
 
 export default store;
