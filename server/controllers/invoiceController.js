@@ -1,8 +1,11 @@
 import asyncHandler from 'express-async-handler';
 import Invoice from '../models/invoiceModel.js';
 import ServiceRecord from '../models/serviceRecordModel.js';
+import Vehicle from '../models/vehicleModel.js';
 import User from '../models/userModel.js';
 import { createNotification } from './notificationController.js';
+import { sendEmail } from '../utils/sendEmail.js';
+import { getInvoiceGeneratedTemplate, getPaymentSuccessfulTemplate } from '../utils/emailTemplates.js';
 
 // @desc    Get all global invoices
 // @route   GET /api/invoices
@@ -108,6 +111,26 @@ const createInvoice = asyncHandler(async (req, res) => {
       `Your final invoice of $${totalAmount.toFixed(2)} is ready for payment.`,
       'Alert'
     );
+
+    // Asynchronously send Invoice Generated Email (non-blocking)
+    const customer = await User.findById(invoice.user);
+    if (customer) {
+      const vehicleName = record.vehicle ? `${record.vehicle.make} ${record.vehicle.model}` : 'Vehicle';
+      sendEmail({
+        to: customer.email,
+        subject: `Invoice Ready: $${totalAmount.toFixed(2)} - AutoCare 💳`,
+        htmlContent: getInvoiceGeneratedTemplate(customer.name, {
+          invoiceId: invoice._id.toString(),
+          vehicleName,
+          laborHours: record.laborHours || 0,
+          partsUsed: record.partsUsed || [],
+          laborCost,
+          partsCost: partsTotal,
+          tax,
+          totalAmount,
+        })
+      });
+    }
   }
 
   // Return fully populated invoice for frontend to use immediately
@@ -136,50 +159,155 @@ const getMyInvoices = asyncHandler(async (req, res) => {
 const markInvoiceAsPaid = asyncHandler(async (req, res) => {
   const invoice = await Invoice.findById(req.params.id);
 
-  if (invoice) {
-    if (invoice.paymentStatus === 'Paid') {
-      res.status(400);
-      throw new Error('Invoice is already marked as paid');
-    }
-
-    invoice.paymentStatus = 'Paid';
-    invoice.paymentDate = Date.now();
-
-    const updatedInvoice = await invoice.save();
-    
-    // ⭐ Sync state back to ServiceRecord
-    const record = await ServiceRecord.findById(invoice.serviceRecord);
-    if (record) {
-      record.isPaid = true;
-      await record.save();
-    }
-
-    // Notification Hook for CUSTOMER
-    await createNotification(
-      invoice.user,
-      'Payment Processed',
-      `Thank you! Payment for invoice #${invoice._id.toString().substring(0,6)} securely tracked.`,
-      'Info'
-    );
-
-    // Notification Hook for SERVICE CENTER (Staff)
-    const staff = await User.find({ role: 'ServiceCenter' });
-    await Promise.all(staff.map(member => 
-      createNotification(
-        member._id,
-        'Payment Received',
-        `Invoice #${invoice._id.toString().substring(0,6)} for ${invoice.vehicle?.make || 'Vehicle'} has been settled.`,
-        'Success'
-      )
-    ));
-
-    console.log(`💰 PAYMENT RECEIVED for Invoice ${invoice._id}`);
-
-    res.status(200).json(updatedInvoice);
-  } else {
+  if (!invoice) {
     res.status(404);
     throw new Error('Invoice not found');
   }
+
+  // Authorization: Only customers can initiate payment through this endpoint
+  if (req.user.role !== 'Customer') {
+    res.status(403);
+    throw new Error('Not authorized: only customers can initiate invoice payment');
+  }
+
+  // Determine invoice ownership from invoice, vehicle, or service record appointment
+  let ownerUserId = invoice.user ? invoice.user.toString() : null;
+
+  if (!ownerUserId && invoice.vehicle) {
+    const vehicle = await Vehicle.findById(invoice.vehicle);
+    if (vehicle && vehicle.user) {
+      ownerUserId = vehicle.user.toString();
+    }
+  }
+
+  if (!ownerUserId && invoice.serviceRecord) {
+    const record = await ServiceRecord.findById(invoice.serviceRecord).populate('appointment');
+    if (record && record.appointment && record.appointment.user) {
+      ownerUserId = record.appointment.user.toString();
+    }
+  }
+
+  // Reject attempts to pay another customer's invoice
+  if (!ownerUserId || ownerUserId !== req.user._id.toString()) {
+    res.status(403);
+    throw new Error('Not authorized to pay this invoice');
+  }
+
+  // Fast-fail checks on current state
+  if (invoice.paymentStatus === 'Paid') {
+    res.status(400);
+    throw new Error('Invoice is already marked as paid');
+  }
+
+  if (invoice.paymentStatus !== 'Pending') {
+    res.status(400);
+    throw new Error(`Invalid payment transition: invoice is in '${invoice.paymentStatus}' state`);
+  }
+
+  // Check associated ServiceRecord state consistency
+  if (invoice.serviceRecord) {
+    const existingRecord = await ServiceRecord.findById(invoice.serviceRecord);
+    if (existingRecord && existingRecord.isPaid) {
+      res.status(400);
+      throw new Error('Associated service record is already marked as paid');
+    }
+  }
+
+  // Atomic conditional transition: Only one concurrent request can transition from 'Pending' to 'Paid'
+  const paymentDate = new Date();
+  const paymentMethod = req.body.paymentMethod || invoice.paymentMethod || 'Online';
+
+  const updatedInvoice = await Invoice.findOneAndUpdate(
+    { _id: invoice._id, paymentStatus: 'Pending' },
+    {
+      $set: {
+        paymentStatus: 'Paid',
+        paymentDate,
+        paymentMethod,
+      },
+    },
+    { new: true }
+  );
+
+  if (!updatedInvoice) {
+    res.status(400);
+    throw new Error('Invoice payment failed: invoice is already paid or undergoing payment');
+  }
+
+  // Sync state back to ServiceRecord with failure handling / compensating rollback
+  if (invoice.serviceRecord) {
+    try {
+      const syncResult = await ServiceRecord.updateOne(
+        { _id: invoice.serviceRecord },
+        { $set: { isPaid: true } }
+      );
+
+      if (syncResult.matchedCount === 0) {
+        throw new Error(`Service record ${invoice.serviceRecord} was not found for payment synchronization`);
+      }
+    } catch (syncError) {
+      console.error(`Failed to synchronize isPaid on ServiceRecord ${invoice.serviceRecord}:`, syncError.message);
+      // Compensating rollback: Revert Invoice back to 'Pending' so documents do not silently diverge
+      try {
+        await Invoice.updateOne(
+          { _id: invoice._id, paymentStatus: 'Paid' },
+          {
+            $set: { paymentStatus: 'Pending' },
+            $unset: { paymentDate: 1 }
+          }
+        );
+      } catch (rollbackErr) {
+        console.error(`CRITICAL: Compensating rollback failed for Invoice ${invoice._id}:`, rollbackErr.message);
+      }
+      res.status(500);
+      throw new Error('Payment processing failed during service record synchronization. Please try again.');
+    }
+  }
+
+  const recipientUserId = invoice.user || ownerUserId;
+
+  // Notification Hook for CUSTOMER
+  if (recipientUserId) {
+    await createNotification(
+      recipientUserId,
+      'Payment Processed',
+      `Thank you! Payment for invoice #${invoice._id.toString().substring(0, 6)} securely tracked.`,
+      'Info'
+    );
+  }
+
+  // Asynchronously send Payment Successful Email (non-blocking)
+  const customer = await User.findById(recipientUserId);
+  const vehicleObj = await Vehicle.findById(invoice.vehicle);
+  const vehicleName = vehicleObj ? `${vehicleObj.make} ${vehicleObj.model}` : 'Vehicle';
+
+  if (customer) {
+    sendEmail({
+      to: customer.email,
+      subject: `Payment Confirmed: Invoice #${invoice._id.toString().substring(0, 8).toUpperCase()} - AutoCare 🧾`,
+      htmlContent: getPaymentSuccessfulTemplate(customer.name, {
+        invoiceId: invoice._id.toString(),
+        vehicleName,
+        amountPaid: invoice.totalAmount || invoice.amount || 0,
+        paymentDate: new Date(updatedInvoice.paymentDate).toLocaleDateString(),
+      })
+    });
+  }
+
+  // Notification Hook for SERVICE CENTER (Staff)
+  const staff = await User.find({ role: 'ServiceCenter' });
+  await Promise.all(staff.map(member => 
+    createNotification(
+      member._id,
+      'Payment Received',
+      `Invoice #${invoice._id.toString().substring(0, 6)} for ${vehicleName} has been settled.`,
+      'Success'
+    )
+  ));
+
+  console.log(`💰 PAYMENT RECEIVED for Invoice ${invoice._id}`);
+
+  res.status(200).json(updatedInvoice);
 });
 
 export { createInvoice, getAllInvoices, getMyInvoices, markInvoiceAsPaid };

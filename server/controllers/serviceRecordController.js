@@ -3,7 +3,10 @@ import ServiceRecord from '../models/serviceRecordModel.js';
 import Appointment from '../models/appointmentModel.js';
 import Vehicle from '../models/vehicleModel.js';
 import Invoice from '../models/invoiceModel.js';
+import User from '../models/userModel.js';
 import { createNotification } from './notificationController.js';
+import { sendEmail } from '../utils/sendEmail.js';
+import { getTechnicianAssignedTemplate, getRepairCompletedTemplate } from '../utils/emailTemplates.js';
 
 // Helper to sync cost of completed records if missing
 const syncCompletedRecordCost = async (record) => {
@@ -65,6 +68,41 @@ const createServiceRecord = asyncHandler(async (req, res) => {
       `A Master Technician has formally been assigned to your vehicle globally!`,
       'Info'
     );
+
+    // Asynchronously send Technician Assigned Emails (non-blocking)
+    const customer = await User.findById(appt.user);
+    const techUser = await User.findById(technician);
+    const vehicleObj = await Vehicle.findById(vehicle);
+
+    if (customer && techUser) {
+      const vehicleName = vehicleObj ? `${vehicleObj.make} ${vehicleObj.model}` : 'Vehicle';
+      
+      // Notify customer
+      sendEmail({
+        to: customer.email,
+        subject: 'Technician Assigned to Your Vehicle - AutoCare 🛠️',
+        htmlContent: getTechnicianAssignedTemplate(customer.name, {
+          vehicleName,
+          serviceType: record.serviceType || appt.serviceType || 'Service',
+          date: appt.date,
+          time: appt.time,
+          technicianName: techUser.name,
+        })
+      });
+
+      // Notify technician
+      sendEmail({
+        to: techUser.email,
+        subject: 'New Repair Job Assigned - AutoCare Workbench 🛠️',
+        htmlContent: `
+          <h2>New Job Assignment</h2>
+          <p>Hello ${techUser.name},</p>
+          <p>You have been assigned to perform a <strong>${record.serviceType || appt.serviceType || 'Service'}</strong> on a <strong>${vehicleName}</strong>.</p>
+          <p>Please check your Workbench dashboard to start the repair work when the vehicle is in the bay.</p>
+          <div style="margin: 20px 0;"><a href="http://localhost:3000/technician" style="background-color: #3b82f6; color: #ffffff; padding: 10px 20px; text-decoration: none; font-weight: bold; border-radius: 5px;">Go to Workbench</a></div>
+        `
+      });
+    }
   }
 
   res.status(201).json(record);
@@ -77,70 +115,99 @@ const updateServiceRecordStatus = asyncHandler(async (req, res) => {
   const { status, partsUsed, laborHours } = req.body;
   const record = await ServiceRecord.findById(req.params.id);
 
-  if (record) {
-    // CRITICAL: Validate status update
-    const validStatuses = ["Pending Approval", "Approved", "Technician Assigned", "Repair In Progress", "Completed", "Rejected", "Cancelled"];
-    if (status && !validStatuses.includes(status)) {
-      res.status(400);
-      throw new Error(`Invalid status: ${status}. Must be one of: ${validStatuses.join(', ')}`);
-    }
-
-    console.log(`🔷 UPDATING SERVICE RECORD ${req.params.id}`);
-    console.log(`   Current status: ${record.status}`);
-    console.log(`   New status: ${status || record.status}`);
-
-    record.status = status || record.status;
-    if (partsUsed) record.partsUsed = partsUsed;
-    if (laborHours) record.laborHours = laborHours;
-
-    if (status === 'Completed') {
-      record.completedAt = Date.now();
-      console.log(`✅ SERVICE MARKED AS COMPLETED`);
-
-      // Calculate and store totalCost (billed price: parts + labor + 10% tax)
-      const partsTotal = record.partsUsed && record.partsUsed.length > 0
-        ? record.partsUsed.reduce((acc, part) => acc + (part.price * part.quantity), 0)
-        : 0;
-      const FIXED_RATE = 100; // $100/hr
-      const laborCost = (record.laborHours || 0) * FIXED_RATE;
-      const amount = partsTotal + laborCost;
-      const tax = amount * 0.10; // 10% tax rate
-      record.totalCost = amount + tax;
-      console.log(`   Total Cost calculated: $${record.totalCost}`);
-    }
-
-    const updatedRecord = await record.save();
-
-    // ⭐ CRITICAL: Sync Appointment status to match ServiceRecord
-    if (record.appointment && status) {
-      const appt = await Appointment.findById(record.appointment);
-      if (appt) {
-        console.log(`   Updating appointment ${record.appointment}:`);
-        console.log(`   Old appointment status: ${appt.status}`);
-        appt.status = status;
-        await appt.save();
-        console.log(`   New appointment status: ${appt.status}`);
-      }
-    }
-
-    // Trigger Notification natively looking up the Vehicle Owner
-    if (status) {
-      const vData = await Vehicle.findById(record.vehicle);
-      if (vData) {
-        await createNotification(
-          vData.user,
-          'Repair Status Updated',
-          `Your vehicle service is now marked as: ${status}`,
-          status === 'Completed' ? 'Alert' : 'Info'
-        );
-      }
-    }
-
-    res.status(200).json(updatedRecord);
-  } else {
+  if (!record) {
     res.status(404);
     throw new Error('Service record not found');
   }
+
+  // Authorization: Technicians can only update service records explicitly assigned to them.
+  // Admins and ServiceCenter staff can update any record based on application permissions.
+  if (req.user.role === 'Technician') {
+    if (!record.technician || record.technician.toString() !== req.user._id.toString()) {
+      res.status(403);
+      throw new Error('Not authorized: You can only update service records assigned to you');
+    }
+  } else if (req.user.role !== 'Admin' && req.user.role !== 'ServiceCenter') {
+    res.status(403);
+    throw new Error('Not authorized to update service records');
+  }
+
+  // CRITICAL: Validate status update
+  const validStatuses = ["Pending Approval", "Approved", "Technician Assigned", "Repair In Progress", "Completed", "Rejected", "Cancelled"];
+  if (status && !validStatuses.includes(status)) {
+    res.status(400);
+    throw new Error(`Invalid status: ${status}. Must be one of: ${validStatuses.join(', ')}`);
+  }
+
+  console.log(`🔷 UPDATING SERVICE RECORD ${req.params.id}`);
+  console.log(`   Current status: ${record.status}`);
+  console.log(`   New status: ${status || record.status}`);
+
+  record.status = status || record.status;
+  if (partsUsed) record.partsUsed = partsUsed;
+  if (laborHours) record.laborHours = laborHours;
+
+  if (status === 'Completed') {
+    record.completedAt = Date.now();
+    console.log(`✅ SERVICE MARKED AS COMPLETED`);
+
+    // Calculate and store totalCost (billed price: parts + labor + 10% tax)
+    const partsTotal = record.partsUsed && record.partsUsed.length > 0
+      ? record.partsUsed.reduce((acc, part) => acc + (part.price * part.quantity), 0)
+      : 0;
+    const FIXED_RATE = 100; // $100/hr
+    const laborCost = (record.laborHours || 0) * FIXED_RATE;
+    const amount = partsTotal + laborCost;
+    const tax = amount * 0.10; // 10% tax rate
+    record.totalCost = amount + tax;
+    console.log(`   Total Cost calculated: $${record.totalCost}`);
+  }
+
+  const updatedRecord = await record.save();
+
+  // ⭐ CRITICAL: Sync Appointment status to match ServiceRecord
+  if (record.appointment && status) {
+    const appt = await Appointment.findById(record.appointment);
+    if (appt) {
+      console.log(`   Updating appointment ${record.appointment}:`);
+      console.log(`   Old appointment status: ${appt.status}`);
+      appt.status = status;
+      await appt.save();
+      console.log(`   New appointment status: ${appt.status}`);
+    }
+  }
+
+  // Trigger Notification natively looking up the Vehicle Owner
+  if (status) {
+    const vData = await Vehicle.findById(record.vehicle);
+    if (vData) {
+      await createNotification(
+        vData.user,
+        'Repair Status Updated',
+        `Your vehicle service is now marked as: ${status}`,
+        status === 'Completed' ? 'Alert' : 'Info'
+      );
+
+      // Asynchronously send Repair Completed Email (non-blocking)
+      if (status === 'Completed') {
+        const customer = await User.findById(vData.user);
+        if (customer) {
+          const vehicleName = `${vData.make} ${vData.model}`;
+          sendEmail({
+            to: customer.email,
+            subject: 'Repair Work Completed - AutoCare 🏁',
+            htmlContent: getRepairCompletedTemplate(customer.name, {
+              vehicleName,
+              serviceType: record.serviceType || 'Service',
+              laborHours: record.laborHours || 0,
+            })
+          });
+        }
+      }
+    }
+  }
+
+  res.status(200).json(updatedRecord);
 });
 
 // @desc    Get technician's assigned service records

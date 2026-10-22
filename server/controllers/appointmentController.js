@@ -1,6 +1,11 @@
+import mongoose from 'mongoose';
 import asyncHandler from 'express-async-handler';
 import Appointment from '../models/appointmentModel.js';
+import Vehicle from '../models/vehicleModel.js';
+import User from '../models/userModel.js';
 import { createNotification } from './notificationController.js';
+import { sendEmail } from '../utils/sendEmail.js';
+import { getAppointmentSubmittedTemplate, getAppointmentApprovedTemplate } from '../utils/emailTemplates.js';
 
 // @desc    Book new appointment
 // @route   POST /api/appointments
@@ -8,14 +13,74 @@ import { createNotification } from './notificationController.js';
 const createAppointment = asyncHandler(async (req, res) => {
   const { vehicle, date, time, serviceType, notes } = req.body;
 
+  if (!vehicle || !date || !time || !serviceType) {
+    res.status(400);
+    throw new Error('Please provide vehicle, date, time, and serviceType');
+  }
+
+  // Reject invalid vehicle ID format
+  if (!mongoose.Types.ObjectId.isValid(vehicle)) {
+    res.status(400);
+    throw new Error('Invalid vehicle ID format');
+  }
+
+  const vehicleObj = await Vehicle.findById(vehicle);
+  if (!vehicleObj) {
+    res.status(404);
+    throw new Error('Vehicle not found');
+  }
+
+  // Role-based authorization & ownership validation:
+  // Customers can only book appointments for vehicles they own.
+  if (req.user.role === 'Customer') {
+    if (!vehicleObj.user || vehicleObj.user.toString() !== req.user._id.toString()) {
+      res.status(403);
+      throw new Error('Not authorized: You can only book appointments for vehicles you own');
+    }
+  } else if (req.user.role !== 'Admin' && req.user.role !== 'ServiceCenter') {
+    res.status(403);
+    throw new Error('Not authorized to book appointments');
+  }
+
+  // Ensure vehicle has an associated owner
+  if (!vehicleObj.user) {
+    res.status(400);
+    throw new Error('Vehicle record is missing an associated owner');
+  }
+
+  // Never trust a vehicle owner ID supplied by the client; bind appointment to verified DB owner
+  const appointmentUserId = (req.user.role === 'Admin' || req.user.role === 'ServiceCenter')
+    ? vehicleObj.user
+    : req.user._id;
+
   const appointment = await Appointment.create({
-    user: req.user._id,
+    user: appointmentUserId,
     vehicle,
     date,
     time,
     serviceType,
     notes,
     status: 'Pending Approval', // Strictly Enforced
+  });
+
+  // Asynchronously send Appointment Submitted Email (non-blocking)
+  const customer = await User.findById(appointmentUserId);
+  const recipientEmail = customer ? customer.email : req.user.email;
+  const recipientName = customer ? customer.name : req.user.name;
+  const vehicleName = vehicleObj ? `${vehicleObj.make} ${vehicleObj.model}` : 'Vehicle';
+  const licensePlate = vehicleObj ? vehicleObj.licensePlate : 'N/A';
+
+  sendEmail({
+    to: recipientEmail,
+    subject: 'Service Appointment Received - AutoCare 📅',
+    htmlContent: getAppointmentSubmittedTemplate(recipientName, {
+      vehicleName,
+      licensePlate,
+      serviceType,
+      date,
+      time,
+      notes,
+    })
   });
 
   res.status(201).json(appointment);
@@ -47,6 +112,22 @@ const approveAppointment = asyncHandler(async (req, res) => {
     `Your upcoming ${appointment.serviceType} service request has been formalized and approved.`,
     'Info'
   );
+
+  // Asynchronously send Appointment Approved Email (non-blocking)
+  const customer = await User.findById(appointment.user);
+  if (customer) {
+    const vehicleName = appointment.vehicle ? `${appointment.vehicle.make} ${appointment.vehicle.model}` : 'Vehicle';
+    sendEmail({
+      to: customer.email,
+      subject: 'Service Appointment Approved! 🔧',
+      htmlContent: getAppointmentApprovedTemplate(customer.name, {
+        vehicleName,
+        serviceType: appointment.serviceType,
+        date: appointment.date,
+        time: appointment.time,
+      })
+    });
+  }
 
   res.status(200).json(appointment);
 });
