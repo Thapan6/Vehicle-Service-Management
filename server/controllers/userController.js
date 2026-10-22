@@ -1,6 +1,8 @@
 import asyncHandler from 'express-async-handler';
 import User from '../models/userModel.js';
 import generateToken from '../utils/generateToken.js';
+import { sendEmail } from '../utils/sendEmail.js';
+import { getWelcomeTemplate } from '../utils/emailTemplates.js';
 
 // @desc    Auth user & get token
 // @route   POST /api/users/login
@@ -55,6 +57,13 @@ const registerUser = asyncHandler(async (req, res) => {
 
   if (user) {
     const token = generateToken(user._id, user.role);
+
+    // Asynchronously send Welcome Email (non-blocking)
+    sendEmail({
+      to: user.email,
+      subject: 'Welcome to AutoCare! 🚗',
+      htmlContent: getWelcomeTemplate(user.name)
+    });
 
     res.status(201).json({
       _id: user._id,
@@ -141,6 +150,13 @@ const createTechnician = asyncHandler(async (req, res) => {
   });
 
   if (user) {
+    // Asynchronously send Welcome Email (non-blocking)
+    sendEmail({
+      to: user.email,
+      subject: 'Welcome to AutoCare! 🚗',
+      htmlContent: getWelcomeTemplate(user.name)
+    });
+
     res.status(201).json({
        _id: user._id, 
        name: user.name, 
